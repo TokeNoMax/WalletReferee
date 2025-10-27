@@ -1,132 +1,160 @@
-# script/generate_signal.py
-import json
-from pathlib import Path
-from datetime import datetime, timedelta, timezone
+"""Generate trading signals for the dashboard."""
 
-import numpy as np
-import pandas as pd
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Dict
+
 import requests
-from ta.momentum import RSIIndicator
-from ta.trend import SMAIndicator, MACD
-from ta.volatility import BollingerBands
+
+from .config import PortfolioConfig, ScoringWeights
+from .data_fetch import fetch_ohlcv, load_portfolio_ids
+from .indicators import IndicatorPayload, compute_indicators
+from .scoring import ScoreResult, score_and_decision
+from .validation import validate_ohlcv
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_DIR = ROOT / "public"
 PUBLIC_DIR.mkdir(exist_ok=True)
 
-PORTFOLIO_FILE = PUBLIC_DIR / "portfolio_ids.json"
-OUTFILE = PUBLIC_DIR / "signals_by_asset.json"
 
-DEFAULT_IDS = ["btc-bitcoin", "eth-ethereum", "solana-solana"]
-DAYS = 200
-
-def fetch_ohlcv(coin_id: str, start: datetime, end: datetime) -> pd.DataFrame:
-    url = (
-        f"https://api.coinpaprika.com/v1/tickers/{coin_id}/ohlcv/historical"
-        f"?start={start.strftime('%Y-%m-%d')}&end={end.strftime('%Y-%m-%d')}"
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--ids",
+        nargs="*",
+        help="Override the asset IDs to process. Defaults to portfolio file or built-ins.",
     )
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    if not isinstance(data, list) or len(data) == 0:
-        raise ValueError(f"Empty OHLCV for {coin_id}")
-    df = pd.DataFrame(data)
-    df["time"] = pd.to_datetime(df["time"], utc=True)
-    return df.sort_values("time").reset_index(drop=True)
+    parser.add_argument(
+        "--lookback",
+        type=int,
+        help="Number of days to fetch for each asset (default: config value).",
+    )
+    parser.add_argument(
+        "--vs-currency",
+        default=None,
+        help="Reporting currency (default: config value).",
+    )
+    parser.add_argument(
+        "--output",
+        default=str(PUBLIC_DIR / "signals_by_asset.json"),
+        help="Where to write the resulting JSON payload.",
+    )
+    return parser
 
-def safe_num(x):
-    try:
-        f = float(x)
-        if np.isnan(f) or np.isinf(f):
-            return None
-        return f
-    except Exception:
-        return None
 
-def compute_indicators(df: pd.DataFrame) -> dict:
-    close = df["close"].astype(float)
-    rsi = RSIIndicator(close).rsi()
-    sma50 = SMAIndicator(close, window=50).sma_indicator()
-    bb = BollingerBands(close, window=20, window_dev=2).bollinger_pband()
-    macd_hist = MACD(close, window_slow=26, window_fast=12, window_sign=9).macd_diff()
+def collect_portfolio_ids(args_ids, config: PortfolioConfig) -> list[str]:
+    if args_ids:
+        return list(dict.fromkeys(i.strip() for i in args_ids if i.strip()))
+    return load_portfolio_ids(ROOT / config.portfolio_file, config.default_ids)
 
-    out = {
-        "rsi14": safe_num(rsi.iloc[-1]),
-        "sma50": safe_num(sma50.iloc[-1]),
-        "bb_pctb": safe_num(bb.iloc[-1]),
-        "macd_hist": safe_num(macd_hist.iloc[-1]),
-        "last_close": safe_num(close.iloc[-1]) if len(close) else None,
-        "last_time": df["time"].iloc[-1].isoformat() if len(df) else None,
+
+def summarise_indicator(ind: IndicatorPayload) -> Dict:
+    return {
+        "rsi14": round(ind.rsi14, 2) if ind.rsi14 is not None else None,
+        "sma50": round(ind.sma50, 2) if ind.sma50 is not None else None,
+        "sma50_slope": round(ind.sma50_slope, 2) if ind.sma50_slope is not None else None,
+        "macd": {
+            "macd": round(ind.macd.get("macd"), 4) if ind.macd.get("macd") is not None else None,
+            "signal": round(ind.macd.get("signal"), 4) if ind.macd.get("signal") is not None else None,
+            "hist": round(ind.macd.get("hist"), 6) if ind.macd.get("hist") is not None else None,
+            "cross": ind.macd.get("cross"),
+        },
+        "bb_pctb": round(ind.bb_pctb, 4) if ind.bb_pctb is not None else None,
+        "bb_width": round(ind.bb_width, 4) if ind.bb_width is not None else None,
+        "atr_pct": round(ind.atr_pct, 2) if ind.atr_pct is not None else None,
     }
-    return out
 
-def score_and_decision(ind: dict) -> dict:
-    rsi = ind.get("rsi14")
-    pctb = ind.get("bb_pctb")
-    macd = ind.get("macd_hist")
-    if rsi is None or pctb is None or macd is None:
-        return {"score": None, "decision": "HOLD"}
 
-    score = 0.5
-    if rsi < 30: score += 0.2
-    elif rsi > 70: score -= 0.2
-
-    if pctb < 0.2: score += 0.15
-    elif pctb > 0.8: score -= 0.15
-
-    if macd > 0: score += 0.1
-    else: score -= 0.1
-
-    score = max(0.0, min(1.0, score))
-    return {"score": round(score, 2), "decision": "BUY" if score >= 0.65 else "SELL" if score <= 0.35 else "HOLD"}
-
-def main():
-    if PORTFOLIO_FILE.exists():
-        try:
-            ids = json.loads(PORTFOLIO_FILE.read_text(encoding="utf-8"))
-            if not isinstance(ids, list) or not ids:
-                ids = DEFAULT_IDS
-        except Exception:
-            ids = DEFAULT_IDS
-    else:
-        ids = DEFAULT_IDS
+def generate_signals(config: PortfolioConfig, weights: ScoringWeights, args) -> Dict:
+    ids = collect_portfolio_ids(args.ids, config)
+    lookback = args.lookback or config.lookback_days
+    vs_currency = args.vs_currency or config.vs_currency
+    outfile = Path(args.output)
 
     end = datetime.now(timezone.utc)
-    start = end - timedelta(days=DAYS)
+    start = end - timedelta(days=lookback)
 
-    results = {}
+    now_iso = datetime.now(timezone.utc).isoformat()
+    results: Dict[str, Dict] = {}
+
+    session = requests.Session()
+
     for cid in ids:
         try:
-            df = fetch_ohlcv(cid, start, end)
-            ind = compute_indicators(df)
+            df = fetch_ohlcv(cid, start, end, session=session)
+        except Exception as exc:  # noqa: BLE001 - surfaced to payload as error.
+            results[cid] = {"error": str(exc)}
+            print(f"[WARN] {cid}: {exc}")
+            continue
 
-            # Tous les indicateurs doivent être numériques
-            if any(ind[k] is None for k in ("rsi14", "sma50", "bb_pctb", "macd_hist", "last_close")):
-                print(f"[SKIP] {cid} -> indicateurs incomplets")
-                continue
+        issues = validate_ohlcv(df)
+        if issues:
+            msg = "; ".join(issues)
+            results[cid] = {"error": msg}
+            print(f"[SKIP] {cid} -> {msg}")
+            continue
 
-            rec = score_and_decision(ind)
+        ind = compute_indicators(df)
 
-            results[cid] = {
-                "id": cid,
-                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-                "indicators": {
-                    "rsi14": round(ind["rsi14"], 2),
-                    "sma50": round(ind["sma50"], 2),
-                    "bb_pctb": round(ind["bb_pctb"], 4),
-                    "macd_hist": round(ind["macd_hist"], 6)
-                },
-                "close": round(ind["last_close"], 2),
-                "last_time": ind["last_time"],
-                "score": rec["score"],
-                "decision": rec["decision"],
-            }
-            print(f"[OK] {cid}")
-        except Exception as e:
-            print(f"[WARN] {cid}: {e}")
+        required = [ind.rsi14, ind.sma50, ind.bb_pctb, ind.last_close, ind.macd.get("hist")]
+        if any(val is None for val in required):
+            msg = "indicateurs incomplets"
+            results[cid] = {"error": msg}
+            print(f"[SKIP] {cid} -> {msg}")
+            continue
 
-    OUTFILE.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\nWrote {OUTFILE} ({len(results)} assets).")
+        score_result = score_and_decision(ind, weights)
+        if score_result.score is None:
+            msg = "score indisponible"
+            results[cid] = {"error": msg}
+            print(f"[SKIP] {cid} -> {msg}")
+            continue
+
+        results[cid] = build_asset_payload(cid, ind, score_result)
+        print(f"[OK] {cid}")
+
+    payload = {
+        "meta": {
+            "generated_at_utc": now_iso,
+            "vs_currency": vs_currency,
+            "lookback_days": lookback,
+            "asset_count": len(ids),
+        },
+        "signals": results,
+    }
+
+    outfile.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\nWrote {outfile} ({len(results)} assets).")
+    return payload
+
+
+def build_asset_payload(cid: str, ind: IndicatorPayload, score_result: ScoreResult) -> Dict:
+    return {
+        "symbol": cid.split("-")[0].upper(),
+        "date": ind.last_time,
+        "close": round(ind.last_close, 2) if ind.last_close is not None else None,
+        "indicators": summarise_indicator(ind),
+        "parts": score_result.parts,
+        "score": score_result.score,
+        "decision": score_result.decision,
+        "percent": score_result.percent,
+    }
+
+
+def main(argv: list[str] | None = None) -> Dict:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    config = PortfolioConfig()
+    weights = ScoringWeights()
+
+    return generate_signals(config, weights, args)
+
 
 if __name__ == "__main__":
     main()
+
