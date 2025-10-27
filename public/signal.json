@@ -1,0 +1,22 @@
+{
+  "meta": {
+    "generated_at_utc": "2025-10-17T20:00:00Z",
+    "coin_id": "btc-bitcoin",
+    "vs_currency": "usd"
+  },
+  "signal": {
+    "symbol": "BTC",
+    "date": "2025-10-17",
+    "close": 96432,
+    "score": 0.72,
+    "decision": "BUY",
+    "percent": 60,
+    "parts": { "rsi": 0.25, "sma": 0.30, "boll": 0.17 },
+    "indicators": {
+      "rsi14": 43.2,
+      "ma50": 95000,
+      "bb_pctb": 0.62,
+      "bb_width": 0.09
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "generated_at": null,
+  "meta": { "vs_currency": "usd", "coin_id": "btc-bitcoin", "generated_at_utc": "—" },
+  "signal": {
+    "symbol": "BTC",
+    "date": "2025-01-01",
+    "close": 50000,
+    "score": 0.7,
+    "decision": "HOLD",
+    "percent": 0,
+    "parts": {},
+    "indicators": { "rsi14": 50, "ma50": 48000, "bb_pctb": 0.5, "bb_width": 0.1 }
+  }
+}

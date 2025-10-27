@@ -1,0 +1,31 @@
+name: Daily Signal
+
+on:
+  schedule:
+    - cron: "0 18 * * *"   # 20:00 Europe/Paris ≈ 18:00 UTC (hiver/été: ajuste si besoin)
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run script
+        run: |
+          python -V
+          python scripts/daily_signal.py
+
+      - name: Commit signal.json
+        run: |
+          git config user.name "actions-bot"
+          git config user.email "actions@github.com"
+          git add docs/signal.json
+          git commit -m "chore: update daily signal" || echo "no changes"
+          git push
