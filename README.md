@@ -15,3 +15,16 @@ npm run dev
 # Dans un autre terminal
 python -m pip install -r requirements.txt
 python script/generate_signal.py
+```
+
+## Tester
+Des tests unitaires couvrent le calcul des indicateurs, le scoring et la validation
+des données OHLCV.
+
+```bash
+python -m unittest discover -s tests
+```
+
+Ces tests n'effectuent aucun appel réseau : ils utilisent des séries synthétiques
+et peuvent donc être lancés hors ligne pour vérifier que la logique cœur du bot
+reste fonctionnelle.
