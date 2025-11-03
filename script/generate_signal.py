@@ -1,132 +1,168 @@
-# script/generate_signal.py
-import json
-from pathlib import Path
-from datetime import datetime, timedelta, timezone
-
-import numpy as np
-import pandas as pd
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Génère public/signal.json à partir de prix CoinGecko.
+Robuste (degraded mode), explicable (reason, confidence), traçable (generatedAt, version).
+"""
+import os, sys, json, time, math, datetime as dt
+from typing import List, Dict, Any
 import requests
-from ta.momentum import RSIIndicator
-from ta.trend import SMAIndicator, MACD
-from ta.volatility import BollingerBands
+import pandas as pd
+import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_DIR = ROOT / "public"
-PUBLIC_DIR.mkdir(exist_ok=True)
+# ===== Configuration =====
+# Edite ta liste ici (id CoinGecko + symbole d’affichage)
+PORTFOLIO = [
+    {"id": "bitcoin", "symbol": "BTC"},
+    {"id": "ethereum", "symbol": "ETH"},
+    {"id": "solana", "symbol": "SOL"},
+]
+VS_CCY = "usd"
+DAYS = 120  # historique pour MA/RSI
+OUTPUT = "public/signal.json"
+VERSION = "1"
 
-PORTFOLIO_FILE = PUBLIC_DIR / "portfolio_ids.json"
-OUTFILE = PUBLIC_DIR / "signals_by_asset.json"
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": "WalletReferee/1.0 (+github actions)"})
 
-DEFAULT_IDS = ["btc-bitcoin", "eth-ethereum", "solana-solana"]
-DAYS = 200
 
-def fetch_ohlcv(coin_id: str, start: datetime, end: datetime) -> pd.DataFrame:
-    url = (
-        f"https://api.coinpaprika.com/v1/tickers/{coin_id}/ohlcv/historical"
-        f"?start={start.strftime('%Y-%m-%d')}&end={end.strftime('%Y-%m-%d')}"
-    )
-    r = requests.get(url, timeout=30)
+def now_iso():
+    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def fetch_market_chart(coin_id: str, vs: str = VS_CCY, days: int = DAYS) -> pd.DataFrame:
+    """CoinGecko market_chart: close-only (daily-ish)."""
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    params = {"vs_currency": vs, "days": days, "interval": "daily"}
+    r = SESSION.get(url, params=params, timeout=30)
     r.raise_for_status()
     data = r.json()
-    if not isinstance(data, list) or len(data) == 0:
-        raise ValueError(f"Empty OHLCV for {coin_id}")
-    df = pd.DataFrame(data)
-    df["time"] = pd.to_datetime(df["time"], utc=True)
-    return df.sort_values("time").reset_index(drop=True)
+    prices = data.get("prices", [])
+    if not prices:
+        raise RuntimeError(f"No prices for {coin_id}")
+    # prices: [ [ms, price], ... ]
+    df = pd.DataFrame(prices, columns=["ts_ms", "close"])
+    df["date"] = pd.to_datetime(df["ts_ms"], unit="ms")
+    df = df[["date", "close"]].dropna()
+    df = df.sort_values("date").reset_index(drop=True)
+    return df
 
-def safe_num(x):
-    try:
-        f = float(x)
-        if np.isnan(f) or np.isinf(f):
-            return None
-        return f
-    except Exception:
-        return None
 
-def compute_indicators(df: pd.DataFrame) -> dict:
-    close = df["close"].astype(float)
-    rsi = RSIIndicator(close).rsi()
-    sma50 = SMAIndicator(close, window=50).sma_indicator()
-    bb = BollingerBands(close, window=20, window_dev=2).bollinger_pband()
-    macd_hist = MACD(close, window_slow=26, window_fast=12, window_sign=9).macd_diff()
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    up = np.where(delta > 0, delta, 0.0)
+    down = np.where(delta < 0, -delta, 0.0)
+    roll_up = pd.Series(up).ewm(alpha=1/period, adjust=False).mean()
+    roll_down = pd.Series(down).ewm(alpha=1/period, adjust=False).mean()
+    rs = roll_up / (roll_down + 1e-12)
+    rsi_val = 100.0 - (100.0 / (1.0 + rs))
+    return pd.Series(rsi_val, index=series.index)
 
-    out = {
-        "rsi14": safe_num(rsi.iloc[-1]),
-        "sma50": safe_num(sma50.iloc[-1]),
-        "bb_pctb": safe_num(bb.iloc[-1]),
-        "macd_hist": safe_num(macd_hist.iloc[-1]),
-        "last_close": safe_num(close.iloc[-1]) if len(close) else None,
-        "last_time": df["time"].iloc[-1].isoformat() if len(df) else None,
+
+def decide_signal(price: float, sma20: float, sma50: float, rsi14: float,
+                  slope20: float) -> (str, float, str):
+    """Règles simples + confidence."""
+    votes = []
+    reasons = []
+
+    # Trend/MAs
+    if price > sma20 > sma50:
+        votes.append(1); reasons.append("Trend up: price>SMA20>SMA50")
+    elif price < sma20 < sma50:
+        votes.append(-1); reasons.append("Trend down: price<SMA20<SMA50")
+
+    # RSI zones
+    if rsi14 < 30:
+        votes.append(1); reasons.append("RSI<30 (oversold)")
+    elif rsi14 > 70:
+        votes.append(-1); reasons.append("RSI>70 (overbought)")
+    else:
+        votes.append(0); reasons.append("RSI neutral")
+
+    # Slope SMA20
+    if slope20 > 0:
+        votes.append(1); reasons.append("SMA20 slope up")
+    elif slope20 < 0:
+        votes.append(-1); reasons.append("SMA20 slope down")
+
+    score = sum(votes)
+    if score >= 2:
+        signal = "BUY"
+    elif score <= -2:
+        signal = "SELL"
+    else:
+        signal = "HOLD"
+
+    # Confidence: normalise par nb de règles
+    confidence = min(1.0, max(0.0, (abs(score) / 3.0)))
+    reason = "; ".join(reasons)
+    return signal, float(confidence), reason
+
+
+def build_entry(coin: Dict[str, str]) -> Dict[str, Any]:
+    cid = coin["id"]; symbol = coin["symbol"]
+    df = fetch_market_chart(cid, VS_CCY, DAYS)
+    close = df["close"]
+    sma20 = close.rolling(20).mean()
+    sma50 = close.rolling(50).mean()
+    rsi14 = rsi(close, 14)
+
+    # pente SMA20 ~ diff des 3 derniers points
+    slope20 = (sma20.iloc[-1] - sma20.iloc[-3]) if len(sma20) >= 3 else 0.0
+
+    last = {
+        "price": float(close.iloc[-1]),
+        "sma20": float(sma20.iloc[-1]),
+        "sma50": float(sma50.iloc[-1]),
+        "rsi14": float(rsi14.iloc[-1]),
+        "slope20": float(slope20),
     }
-    return out
+    signal, confidence, reason = decide_signal(
+        last["price"], last["sma20"], last["sma50"], last["rsi14"], last["slope20"]
+    )
+    return {
+        "id": cid,
+        "symbol": symbol,
+        "signal": signal,
+        "confidence": round(confidence, 3),
+        "price": round(last["price"], 6),
+        "reason": reason,
+        "timestamp": now_iso(),
+    }
 
-def score_and_decision(ind: dict) -> dict:
-    rsi = ind.get("rsi14")
-    pctb = ind.get("bb_pctb")
-    macd = ind.get("macd_hist")
-    if rsi is None or pctb is None or macd is None:
-        return {"score": None, "decision": "HOLD"}
-
-    score = 0.5
-    if rsi < 30: score += 0.2
-    elif rsi > 70: score -= 0.2
-
-    if pctb < 0.2: score += 0.15
-    elif pctb > 0.8: score -= 0.15
-
-    if macd > 0: score += 0.1
-    else: score -= 0.1
-
-    score = max(0.0, min(1.0, score))
-    return {"score": round(score, 2), "decision": "BUY" if score >= 0.65 else "SELL" if score <= 0.35 else "HOLD"}
 
 def main():
-    if PORTFOLIO_FILE.exists():
+    errors = []
+    entries = []
+    for coin in PORTFOLIO:
         try:
-            ids = json.loads(PORTFOLIO_FILE.read_text(encoding="utf-8"))
-            if not isinstance(ids, list) or not ids:
-                ids = DEFAULT_IDS
-        except Exception:
-            ids = DEFAULT_IDS
-    else:
-        ids = DEFAULT_IDS
-
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=DAYS)
-
-    results = {}
-    for cid in ids:
-        try:
-            df = fetch_ohlcv(cid, start, end)
-            ind = compute_indicators(df)
-
-            # Tous les indicateurs doivent être numériques
-            if any(ind[k] is None for k in ("rsi14", "sma50", "bb_pctb", "macd_hist", "last_close")):
-                print(f"[SKIP] {cid} -> indicateurs incomplets")
-                continue
-
-            rec = score_and_decision(ind)
-
-            results[cid] = {
-                "id": cid,
-                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-                "indicators": {
-                    "rsi14": round(ind["rsi14"], 2),
-                    "sma50": round(ind["sma50"], 2),
-                    "bb_pctb": round(ind["bb_pctb"], 4),
-                    "macd_hist": round(ind["macd_hist"], 6)
-                },
-                "close": round(ind["last_close"], 2),
-                "last_time": ind["last_time"],
-                "score": rec["score"],
-                "decision": rec["decision"],
-            }
-            print(f"[OK] {cid}")
+            entries.append(build_entry(coin))
         except Exception as e:
-            print(f"[WARN] {cid}: {e}")
+            errors.append(f'{coin["id"]}: {e}')
 
-    OUTFILE.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\nWrote {OUTFILE} ({len(results)} assets).")
+    status = "ok" if not errors and entries else "degraded"
+    out = {
+        "version": VERSION,
+        "generatedAt": now_iso(),
+        "status": status,
+        "entries": entries,
+    }
+
+    os.makedirs(os.path.dirname(OUTPUT), exist_ok=True)
+    with open(OUTPUT, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+
+    # Logs lisibles dans les artefacts Actions
+    print("=== WalletReferee generation ===")
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    if errors:
+        print("Errors:", file=sys.stderr)
+        for e in errors:
+            print(" -", e, file=sys.stderr)
+        # Code 0 pour ne pas casser le run si on a au moins un entry
+        if not entries:
+            sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
