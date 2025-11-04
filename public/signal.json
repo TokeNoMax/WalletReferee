@@ -1,22 +1,34 @@
 {
-  "meta": {
-    "generated_at_utc": "2025-10-17T20:00:00Z",
-    "coin_id": "btc-bitcoin",
-    "vs_currency": "usd"
-  },
-  "signal": {
-    "symbol": "BTC",
-    "date": "2025-10-17",
-    "close": 96432,
-    "score": 0.72,
-    "decision": "BUY",
-    "percent": 60,
-    "parts": { "rsi": 0.25, "sma": 0.30, "boll": 0.17 },
-    "indicators": {
-      "rsi14": 43.2,
-      "ma50": 95000,
-      "bb_pctb": 0.62,
-      "bb_width": 0.09
+  "version": "1",
+  "generatedAt": "2025-11-04T07:25:58Z",
+  "status": "ok",
+  "entries": [
+    {
+      "id": "bitcoin",
+      "symbol": "BTC",
+      "signal": "SELL",
+      "confidence": 0.667,
+      "price": 104508.169741,
+      "reason": "Trend down: price<SMA20<SMA50; RSI neutral; SMA20 slope down",
+      "timestamp": "2025-11-04T07:25:58Z"
+    },
+    {
+      "id": "ethereum",
+      "symbol": "ETH",
+      "signal": "SELL",
+      "confidence": 0.667,
+      "price": 3493.901771,
+      "reason": "Trend down: price<SMA20<SMA50; RSI neutral; SMA20 slope down",
+      "timestamp": "2025-11-04T07:25:58Z"
+    },
+    {
+      "id": "solana",
+      "symbol": "SOL",
+      "signal": "HOLD",
+      "confidence": 0.333,
+      "price": 157.780906,
+      "reason": "Trend down: price<SMA20<SMA50; RSI<30 (oversold); SMA20 slope down",
+      "timestamp": "2025-11-04T07:25:58Z"
     }
-  }
+  ]
 }
