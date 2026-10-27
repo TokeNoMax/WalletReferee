@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "generatedAt": "2026-10-26T14:04:51Z",
+  "generatedAt": "2026-10-27T13:05:34Z",
   "status": "ok",
   "entries": [
     {
@@ -8,27 +8,27 @@
       "symbol": "BTC",
       "signal": "HOLD",
       "confidence": 0.333,
-      "price": 79507.91888,
+      "price": 80191.993408,
       "reason": "RSI neutral; SMA20 slope down",
-      "timestamp": "2026-10-26T14:04:51Z"
+      "timestamp": "2026-10-27T13:05:34Z"
     },
     {
       "id": "ethereum",
       "symbol": "ETH",
       "signal": "SELL",
       "confidence": 0.667,
-      "price": 2296.499563,
+      "price": 2330.409008,
       "reason": "Trend down: price<SMA20<SMA50; RSI neutral; SMA20 slope down",
-      "timestamp": "2026-10-26T14:04:51Z"
+      "timestamp": "2026-10-27T13:05:34Z"
     },
     {
       "id": "solana",
       "symbol": "SOL",
       "signal": "SELL",
       "confidence": 0.667,
-      "price": 100.629743,
+      "price": 100.70355,
       "reason": "Trend down: price<SMA20<SMA50; RSI neutral; SMA20 slope down",
-      "timestamp": "2026-10-26T14:04:51Z"
+      "timestamp": "2026-10-27T13:05:34Z"
     }
   ]
 }
